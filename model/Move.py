@@ -1,4 +1,5 @@
 from math import *
+
 from model.ActionType import ActionType
 from model.VehicleType import VehicleType
 
