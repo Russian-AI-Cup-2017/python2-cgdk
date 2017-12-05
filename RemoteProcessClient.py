@@ -28,7 +28,7 @@ class RemoteProcessClient:
     LONG_SIZE_BYTES = 8
     DOUBLE_SIZE_BYTES = 8
 
-    EMPTY_BYTE_ARRAY = ''
+    EMPTY_BYTE_ARRAY = b''
 
     GAME_STRUCT = struct.Struct(BYTE_ORDER_FORMAT_STRING + "qi2db9i19di4d7i4d7i2d3i2di4d7i4d6i4d2i2di")
     PLAYER_STRUCT = struct.Struct(BYTE_ORDER_FORMAT_STRING + "q2b3iqi2d")
@@ -40,6 +40,11 @@ class RemoteProcessClient:
         self.socket = socket.socket()
         self.socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, True)
         self.socket.connect((host, port))
+
+        self.read_buffer = bytearray(b'\0' * RemoteProcessClient.BUFFER_SIZE_BYTES)
+        self.read_view = memoryview(self.read_buffer)
+        self.read_left = 0
+        self.read_right = 0
 
         self.previous_players = None
         self.previous_player_by_id = {}
@@ -134,8 +139,9 @@ class RemoteProcessClient:
         if not self.read_boolean():
             return None
 
-        byte_array = self.read_bytes(565)
-        game = RemoteProcessClient.GAME_STRUCT.unpack(byte_array)
+        self.read_bytes(565)
+        game = RemoteProcessClient.GAME_STRUCT.unpack_from(self.read_buffer, self.read_left)
+        self.read_left += 565
 
         return Game(
             game[0], game[1], game[2], game[3], game[4] != 0, game[5], game[6], game[7], game[8], game[9], game[10],
@@ -307,8 +313,9 @@ class RemoteProcessClient:
         if flag == 127:
             return self.previous_player_by_id[self.read_long()]
 
-        byte_array = self.read_bytes(50)
-        player = RemoteProcessClient.PLAYER_STRUCT.unpack(byte_array)
+        self.read_bytes(50)
+        player = RemoteProcessClient.PLAYER_STRUCT.unpack_from(self.read_buffer, self.read_left)
+        self.read_left += 50
 
         player = Player(
             player[0], player[1] != 0, player[2] != 0, player[3], player[4], player[5], player[6], player[7], player[8],
@@ -387,8 +394,9 @@ class RemoteProcessClient:
         if not self.read_boolean():
             return None
 
-        byte_array = self.read_bytes(128)
-        vehicle = RemoteProcessClient.VEHICLE_STRUCT.unpack(byte_array)
+        self.read_bytes(128)
+        vehicle = RemoteProcessClient.VEHICLE_STRUCT.unpack_from(self.read_buffer, self.read_left)
+        self.read_left += 128
 
         return Vehicle(
             vehicle[0], vehicle[1], vehicle[2], vehicle[3], vehicle[4], vehicle[5], vehicle[6], vehicle[7], vehicle[8],
@@ -448,8 +456,9 @@ class RemoteProcessClient:
         if not self.read_boolean():
             return None
 
-        byte_array = self.read_bytes(33)
-        vehicle_update = RemoteProcessClient.VEHICLE_UPDATE_STRUCT.unpack(byte_array)
+        self.read_bytes(33)
+        vehicle_update = RemoteProcessClient.VEHICLE_UPDATE_STRUCT.unpack_from(self.read_buffer, self.read_left)
+        self.read_left += 33
 
         return VehicleUpdate(
             vehicle_update[0], vehicle_update[1], vehicle_update[2], vehicle_update[3], vehicle_update[4],
@@ -490,8 +499,9 @@ class RemoteProcessClient:
         if not self.read_boolean():
             return None
 
-        byte_array = self.read_bytes(24)
-        world = RemoteProcessClient.WORLD_STRUCT.unpack(byte_array)
+        self.read_bytes(24)
+        world = RemoteProcessClient.WORLD_STRUCT.unpack_from(self.read_buffer, self.read_left)
+        self.read_left += 24
 
         return World(
             world[0], world[1], world[2], world[3], self.read_players(), self.read_vehicles(),
@@ -550,8 +560,9 @@ class RemoteProcessClient:
             raise ValueError("Received wrong message [actual=%s, expected=%s]." % (actual_type, expected_type))
 
     def read_enum(self, enum_class):
-        byte_array = self.read_bytes(1)
-        value = RemoteProcessClient.BYTE_FORMAT_STRUCT.unpack(byte_array)[0]
+        self.read_bytes(1)
+        value = RemoteProcessClient.BYTE_FORMAT_STRUCT.unpack_from(self.read_buffer, self.read_left)[0]
+        self.read_left += 1
 
         for enum_key, enum_value in enum_class.__dict__.iteritems():
             if not str(enum_key).startswith("__") and value == enum_value:
@@ -565,7 +576,12 @@ class RemoteProcessClient:
         if count <= 0:
             return None if nullable and count < 0 else RemoteProcessClient.EMPTY_BYTE_ARRAY
 
-        return self.read_bytes(count)
+        self.read_bytes(count)
+
+        try:
+            return self.read_buffer[self.read_left:self.read_left + count]
+        finally:
+            self.read_left += count
 
     def write_byte_array(self, array):
         if array is None:
@@ -608,8 +624,12 @@ class RemoteProcessClient:
         if length == -1:
             return None
 
-        byte_array = self.read_bytes(length)
-        return byte_array.decode("utf-8")
+        self.read_bytes(length)
+
+        try:
+            return self.read_buffer[self.read_left:self.read_left + length].decode("utf-8")
+        finally:
+            self.read_left += length
 
     def write_string(self, value):
         if value is None:
@@ -622,24 +642,39 @@ class RemoteProcessClient:
         self.write_bytes(byte_array)
 
     def read_signed_byte(self):
-        byte_array = self.read_bytes(1)
-        return RemoteProcessClient.BYTE_FORMAT_STRUCT.unpack(byte_array)[0]
+        self.read_bytes(1)
+
+        try:
+            return RemoteProcessClient.BYTE_FORMAT_STRUCT.unpack_from(self.read_buffer, self.read_left)[0]
+        finally:
+            self.read_left += 1
 
     def read_boolean(self):
-        return self.read_bytes(1) != b'\0'
+        self.read_bytes(1)
+
+        try:
+            return self.read_buffer[self.read_left] != 0
+        finally:
+            self.read_left += 1
 
     def read_boolean_array(self, count):
-        byte_array = self.read_bytes(count)
-        unpacked_bytes = struct.unpack(RemoteProcessClient.BYTE_ORDER_FORMAT_STRING + str(count) + "b", byte_array)
+        self.read_bytes(count)
 
-        return [unpacked_bytes[i] != 0 for i in xrange(count)]
+        try:
+            return [self.read_buffer[i + self.read_left] != 0 for i in xrange(count)]
+        finally:
+            self.read_left += count
 
     def write_boolean(self, value):
         self.write_bytes(RemoteProcessClient.BYTE_FORMAT_STRUCT.pack(1 if value else 0))
 
     def read_int(self):
-        byte_array = self.read_bytes(RemoteProcessClient.INTEGER_SIZE_BYTES)
-        return RemoteProcessClient.INT_FORMAT_STRUCT.unpack(byte_array)[0]
+        self.read_bytes(RemoteProcessClient.INTEGER_SIZE_BYTES)
+
+        try:
+            return RemoteProcessClient.INT_FORMAT_STRUCT.unpack_from(self.read_buffer, self.read_left)[0]
+        finally:
+            self.read_left += RemoteProcessClient.INTEGER_SIZE_BYTES
 
     def read_ints(self):
         count = self.read_int()
@@ -649,8 +684,12 @@ class RemoteProcessClient:
         ints = []
 
         if count > 0:
-            byte_array = self.read_bytes(RemoteProcessClient.INTEGER_SIZE_BYTES * count)
-            ints.extend(struct.unpack(RemoteProcessClient.BYTE_ORDER_FORMAT_STRING + str(count) + "i", byte_array))
+            byte_count = RemoteProcessClient.INTEGER_SIZE_BYTES * count
+            self.read_bytes(byte_count)
+            ints.extend(struct.unpack_from(
+                RemoteProcessClient.BYTE_ORDER_FORMAT_STRING + str(count) + "i", self.read_buffer, self.read_left
+            ))
+            self.read_left += byte_count
 
         return ints
 
@@ -680,31 +719,43 @@ class RemoteProcessClient:
                 self.write_ints(ints)
 
     def read_long(self):
-        byte_array = self.read_bytes(RemoteProcessClient.LONG_SIZE_BYTES)
-        return RemoteProcessClient.LONG_FORMAT_STRUCT.unpack(byte_array)[0]
+        self.read_bytes(RemoteProcessClient.LONG_SIZE_BYTES)
+
+        try:
+            return RemoteProcessClient.LONG_FORMAT_STRUCT.unpack_from(self.read_buffer, self.read_left)[0]
+        finally:
+            self.read_left += RemoteProcessClient.LONG_SIZE_BYTES
 
     def write_long(self, value):
         self.write_bytes(RemoteProcessClient.LONG_FORMAT_STRUCT.pack(value))
 
     def read_double(self):
-        byte_array = self.read_bytes(RemoteProcessClient.DOUBLE_SIZE_BYTES)
-        return RemoteProcessClient.DOUBLE_FORMAT_STRUCT.unpack(byte_array)[0]
+        self.read_bytes(RemoteProcessClient.DOUBLE_SIZE_BYTES)
+
+        try:
+            return RemoteProcessClient.DOUBLE_FORMAT_STRUCT.unpack_from(self.read_buffer, self.read_left)[0]
+        finally:
+            self.read_left += RemoteProcessClient.DOUBLE_SIZE_BYTES
 
     def write_double(self, value):
         self.write_bytes(RemoteProcessClient.DOUBLE_FORMAT_STRUCT.pack(value))
 
     def read_bytes(self, byte_count):
-        byte_array = RemoteProcessClient.EMPTY_BYTE_ARRAY
+        if self.read_right - self.read_left >= byte_count:
+            return
 
-        while len(byte_array) < byte_count:
-            chunk = self.socket.recv(byte_count - len(byte_array))
+        if RemoteProcessClient.BUFFER_SIZE_BYTES - self.read_left < byte_count:
+            self.read_view[0:self.read_right - self.read_left] = self.read_buffer[self.read_left:self.read_right]
+            self.read_right -= self.read_left
+            self.read_left = 0
 
-            if not len(chunk):
+        while self.read_right - self.read_left < byte_count:
+            read_length = self.socket.recv_into(self.read_view[self.read_right:])
+
+            if read_length <= 0:
                 raise IOError("Can't read %s bytes from input stream." % str(byte_count))
 
-            byte_array += chunk
-
-        return byte_array
+            self.read_right += read_length
 
     def write_bytes(self, byte_array):
         self.socket.sendall(byte_array)
